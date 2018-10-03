@@ -2988,9 +2988,10 @@ int main(int argc, char *argv[])
 	//if (!cartridge::load("Tests/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb", rom))
 	//if (!cartridge::load("Tests/cpu_instrs/individual/08-misc instrs.gb", rom))
 	//if (!cartridge::load("Tests/cpu_instrs/individual/09-op r,r.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/10-bit ops", rom))
+	//if (!cartridge::load("Tests/cpu_instrs/individual/10-bit ops.gb", rom))
 	//if (!cartridge::load("Tests/cpu_instrs/individual/11-op a,(hl).gb", rom))
 	{
+		printf("failed to load cartridge.\n");
 		return -1;
 	}
 
