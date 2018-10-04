@@ -106,24 +106,13 @@ namespace memory
 
 	uint8_t read_byte(const std::vector<uint8_t>& memory, uint16_t addr)
 	{
-		// HACK: At 0x0235 Tetris reads LY (0xFF44) into A and loops until it 
-		// equals  0x94. At 0x282A it loops until it equals 0x91. I don't know
-		// what is responsible for setting this yet.
-		if (addr == registers::LY)
+		// HACK: IO: https://fms.komkon.org/GameBoy/Tech/Software.html
+		if (addr >= 0xFF00 && addr <= 0xFFFF)
 		{
-			static uint8_t LY = 0x91;
-			++LY;
-			if (LY > 0x94)
+			if (addr == 0xF00)	// Joypad
 			{
-				LY = 0x91;
+				return 0xEF;
 			}
-			return LY;
-		}
-
-		// HACK: No input yet
-		if (addr == 0xFF00)
-		{
-			return 0xEF;
 		}
 
 		return memory[addr];
@@ -146,12 +135,14 @@ namespace memory
 
 	void write_byte(std::vector<uint8_t>& memory, uint16_t addr, uint8_t byte)
 	{
+		// Serial
 		if (addr == registers::SC && byte == 0x81)
 		{
 			debug::print("%u", memory[registers::SB]);
 		}
 
-		if (addr == registers::LCDC)
+		// HACK: IO: https://fms.komkon.org/GameBoy/Tech/Software.html
+		if (addr >= 0xFF00 && addr <= 0xFFFF)
 		{
 			static int i = 0;
 			++i;
@@ -2671,49 +2662,12 @@ namespace cpu
 		static bool debug_step = false;
 		static bool debug_serial = false;
 
-		// This is the ei instruction right before the first vblank
-		if (cpu.registers.PC == 0x02BA)
-		{
-			static int i = 0;
-			++i;
-		}
-
-		// This is the reti instructino at the end of the first vblank
-		if (cpu.registers.PC == 0x020B)
-		{
-			static int i = 0;
-			++i;
-		}
-
-		// This is the first call instruction right before the second vblank
-		if (cpu.registers.PC == 0x02C4)
-		{
-			static int i = 0;
-			++i;
-
-			//debug_instruction = true;
-			//debug_registers = true;
-			//debug_step = true;
-		}
-
-		// This is the second call instruction right before the second vblank
-		if (cpu.registers.PC == 0x02C7)
-		{
-			static int i = 0;
-			++i;
-
-			//debug_instruction = true;
-			//debug_registers = true;
-			//debug_step = true;
-		}
-
 		// This is where a tileset is first loaded into memory on Tetris
 		if (cpu.registers.PC == 0x036C)
 		{
 			static int i = 0;
 			++i;
 		}
-
 
 		if (debug_registers)
 		{
@@ -2785,11 +2739,16 @@ namespace cpu
 				debug::print("   ");
 			}
 			debug::print("  %s\n", instruction.format);
+			// debug::print("  %s \t\t%c A:%02X B:%02X\n", 
+			// instruction.format, 
+			// get_flag(cpu, flags::ZERO) ? 'Z' : '-', 
+			// cpu.registers.A, 
+			// cpu.registers.B);
 		}
 
 		if (debug_step)
 		{
-			getchar();
+			_getwch();
 		}
 
 		// If the current instruction enables interrupts we to delay acting on
@@ -3019,6 +2978,7 @@ int main(int argc, char *argv[])
 
 	// This would normally be done by the bootloader
 	cpu.registers.AF = 0x01B0;
+	//cpu.registers.AF = 0x11B0;
 	cpu.registers.BC = 0x0013;
 	cpu.registers.DE = 0x00D8;
 	cpu.registers.HL = 0x014D;
@@ -3028,32 +2988,44 @@ int main(int argc, char *argv[])
 	uint32_t pixels[display::width * display::height];
 	memset(pixels, 0, display::width * display::height * sizeof(uint32_t));
 
-	uint32_t scanline_index = 0;
-
 	bool done = false;
 	while (!done)
 	{
+		uint8_t CURLINE = memory::read_byte(memory, memory::registers::LY);
+
 		cpu::tick(cpu, memory);
-		uint8_t scanline[display::width];
-		display::tick(memory, scanline_index, scanline);
 
-		static const uint32_t palette[4] =
+		if (CURLINE < display::height)
 		{
-			0xFFFFFFFF,
-			0xC0C0C0FF,
-			0x606060FF,
-			0x000000FF,
-		};
+			static const uint32_t palette[4] =
+			{
+				0xFFFFFFFF,
+				0xC0C0C0FF,
+				0x606060FF,
+				0x000000FF,
+			};
 
-		for (uint8_t x = 0; x < display::width; ++x)
+			uint8_t scanline[display::width];
+			display::tick(memory, CURLINE, scanline);
+
+			for (uint8_t x = 0; x < display::width; ++x)
+			{
+				pixels[CURLINE * display::width + x] = palette[scanline[x]];
+			}
+
+			++CURLINE;
+		}
+		else if (CURLINE < 153)
 		{
-			pixels[scanline_index * display::width + x] = palette[scanline[x]];
+			// V_BLANK period
+			++CURLINE;
+		}
+		else
+		{
+			CURLINE = 0;
 		}
 
-		if (++scanline_index >= display::height)
-		{
-			scanline_index = 0;
-		}
+		memory::write_byte(memory, memory::registers::LY, CURLINE);
 
 		SDL_UpdateTexture(texture, nullptr, pixels, display::width * sizeof(uint32_t));
 
