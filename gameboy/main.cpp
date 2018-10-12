@@ -23,6 +23,13 @@ namespace debug
 
 namespace memory
 {
+	enum class controller_type
+	{
+		UNKNOWN,
+		NONE,
+		MBC1,
+	} controller;
+
 	// Memory Map:
 	// 0000 - 3FFF	16KB ROM Bank 00 (in cartridge, fixed at bank 00)
 	// 4000 - 7FFF	16KB ROM Bank 01..NN (in cartridge, switchable bank number)
@@ -135,17 +142,40 @@ namespace memory
 
 	void write_byte(std::vector<uint8_t>& memory, uint16_t addr, uint8_t byte)
 	{
+		// Look for writes to ROM
+		if (addr < 0x8000)
+		{
+			// http://imrannazar.com/GameBoy-Emulation-in-JavaScript:-Memory-Banking
+			if (addr < 0x1FFF)
+			{
+				// Enable external RAM. 
+				static int i = 0;
+				++i;
+			}
+			else if (addr < 0x3FFF)
+			{
+				// ROM bank
+				static int j = 0;
+				++j;
+			}
+			else if (addr < 0x5FFF)
+			{
+				// ROM bank
+				static int k = 0;
+				++k;
+			}
+			else if (addr < 0x8000)
+			{
+				// Mode
+				static int w = 0;
+				++w;
+			}
+		}
+
 		// Serial
 		if (addr == registers::SC && byte == 0x81)
 		{
 			debug::print("%u", memory[registers::SB]);
-		}
-
-		// HACK: IO: https://fms.komkon.org/GameBoy/Tech/Software.html
-		if (addr >= 0xFF00 && addr <= 0xFFFF)
-		{
-			static int i = 0;
-			++i;
 		}
 
 		memory[addr] = byte;
@@ -155,6 +185,11 @@ namespace memory
 
 namespace cpu
 {
+	static bool debug_instruction = false;
+	static bool debug_registers = false;
+	static bool debug_step = false;
+	static bool debug_serial = false;
+
 	struct cpu
 	{
 		struct registers
@@ -2657,16 +2692,65 @@ namespace cpu
 
 	int tick(cpu& cpu, std::vector<uint8_t>& memory)
 	{
-		static bool debug_instruction = false;
-		static bool debug_registers = false;
-		static bool debug_step = false;
-		static bool debug_serial = false;
-
 		// This is where a tileset is first loaded into memory on Tetris
 		if (cpu.registers.PC == 0x036C)
 		{
 			static int i = 0;
 			++i;
+
+			debug_instruction = true;
+			debug_registers = true;
+		}
+
+		// Handle interrupts
+		if (cpu.interrupt_master)
+		{
+			static const uint8_t V_BLANK = 0x1;		// INT 40
+			static const uint8_t LCD_STAT = 0x2;	// INT 48
+			static const uint8_t TIMER = 0x4;		// INT 50
+			static const uint8_t SERIAL = 0x8;		// INT 58
+			static const uint8_t JOYPAD = 0x10;		// INT 60
+
+			const uint8_t interrupt_enable = memory::read_byte(memory, memory::registers::IE);
+			const uint8_t interrupt_flags = memory::read_byte(memory, memory::registers::IF);
+			const uint8_t interrupts_triggered = interrupt_enable & interrupt_flags;
+
+			if (interrupts_triggered)
+			{
+				if (interrupts_triggered & V_BLANK)
+				{
+					uint8_t operands[2] = { 0x40, 0x00 };
+					instructions::call_nn(operands, cpu, memory);
+				}
+
+				if (interrupts_triggered & LCD_STAT)
+				{
+					uint8_t operands[2] = { 0x48, 0x00 };
+					instructions::call_nn(operands, cpu, memory);
+				}
+
+				if (interrupts_triggered & TIMER)
+				{
+					uint8_t operands[2] = { 0x50, 0x00 };
+					instructions::call_nn(operands, cpu, memory);
+				}
+
+				if (interrupts_triggered & SERIAL)
+				{
+					uint8_t operands[2] = { 0x58, 0x00 };
+					instructions::call_nn(operands, cpu, memory);
+				}
+
+				if (interrupts_triggered & JOYPAD)
+				{
+					uint8_t operands[2] = { 0x60, 0x00 };
+					instructions::call_nn(operands, cpu, memory);
+				}
+
+				memory::write_byte(memory, memory[memory::registers::IF], (interrupt_flags & ~interrupts_triggered));
+
+				cpu.interrupt_master = 0;
+			}
 		}
 
 		if (debug_registers)
@@ -2739,11 +2823,16 @@ namespace cpu
 				debug::print("   ");
 			}
 			debug::print("  %s\n", instruction.format);
-			// debug::print("  %s \t\t%c A:%02X B:%02X\n", 
-			// instruction.format, 
-			// get_flag(cpu, flags::ZERO) ? 'Z' : '-', 
-			// cpu.registers.A, 
-			// cpu.registers.B);
+			// debug::print("  %s \t\t%c A:%02X B:%02X E:%02X", 
+			// 	instruction.format, 
+			// 	get_flag(cpu, flags::ZERO) ? 'Z' : '-', 
+			// 	cpu.registers.A, 
+			// 	cpu.registers.B,
+			// 	cpu.registers.E);
+			// debug::print(" HL:%04X (HL):%02X", cpu.registers.HL, memory::read_byte(memory, cpu.registers.HL));
+			// debug::print(" SP:%04X (SP):%02X", cpu.registers.SP, memory::read_byte(memory, cpu.registers.SP));
+			// debug::print(" (DFFF):%02X", memory::read_byte(memory, 0xDFFF));
+			// debug::print("\n");
 		}
 
 		if (debug_step)
@@ -2751,72 +2840,11 @@ namespace cpu
 			_getwch();
 		}
 
-		// If the current instruction enables interrupts we to delay acting on
-		// any already requested interrupts until the end of the next instruction. 
-		// The docs are somewhat ambiguous but this matches the behavior of BGB
-		const bool interrupt_master = cpu.interrupt_master;
-
 		instruction.exec(operands, cpu, memory);
 
 		if (debug_serial)
 		{
 			debug::print("%u", memory[memory::registers::SB]);
-		}
-
-		// Handle interrupts
-		if (interrupt_master)
-		{
-			static const uint8_t V_BLANK = 0x1;		// INT 40
-			static const uint8_t LCD_STAT = 0x2;	// INT 48
-			static const uint8_t TIMER = 0x4;		// INT 50
-			static const uint8_t SERIAL = 0x8;		// INT 58
-			static const uint8_t JOYPAD = 0x10;		// INT 60
-
-			const uint8_t enabled_interrupts = memory[memory::registers::IE];
-			const uint8_t requested_interrupts = memory[memory::registers::IF];
-			const uint8_t triggered_interrupts = enabled_interrupts & requested_interrupts;
-
-			if (triggered_interrupts)
-			{
-				if (triggered_interrupts & V_BLANK)
-				{
-					operands[0] = 0x40;
-					operands[1] = 0x00;
-					instructions::call_nn(operands, cpu, memory);
-				}
-
-				if (triggered_interrupts & LCD_STAT)
-				{
-					operands[0] = 0x48;
-					operands[1] = 0x00;
-					instructions::call_nn(operands, cpu, memory);
-				}
-
-				if (triggered_interrupts & TIMER)
-				{
-					operands[0] = 0x50;
-					operands[1] = 0x00;
-					instructions::call_nn(operands, cpu, memory);
-				}
-
-				if (triggered_interrupts & SERIAL)
-				{
-					operands[0] = 0x58;
-					operands[1] = 0x00;
-					instructions::call_nn(operands, cpu, memory);
-				}
-
-				if (triggered_interrupts & JOYPAD)
-				{
-					operands[0] = 0x60;
-					operands[1] = 0x00;
-					instructions::call_nn(operands, cpu, memory);
-				}
-
-				cpu.interrupt_master = 0;
-
-				memory[memory::registers::IF] = requested_interrupts & ~triggered_interrupts;
-			}
 		}
 
 		return 0;
@@ -2936,21 +2964,23 @@ int main(int argc, char *argv[])
 
 	std::vector<uint8_t> memory(0x10000);
 
+	const char* cartridge_path = "tetris-USA.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/cpu_instrs.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/01-special.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/02-interrupts.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/03-op sp,hl.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/04-op r,imm.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/06-ld r,r.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/08-misc instrs.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/09-op r,r.gb";
+	//const char* cartridge_path = "tests/cpu_instrs/individual/10-bit ops.gb";
+	// const char* cartridge_path = "tests/cpu_instrs/individual/11-op a,(hl).gb";
+
 	std::vector<uint8_t> rom(0x8000);
-	if (!cartridge::load("Tetris-USA.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/cpu_instrs.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/01-special.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/02-interrupts.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/03-op sp,hl.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/04-op r,imm.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/06-ld r,r.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/07-jr,jp,call,ret,rst.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/08-misc instrs.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/09-op r,r.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/10-bit ops.gb", rom))
-	//if (!cartridge::load("Tests/cpu_instrs/individual/11-op a,(hl).gb", rom))
+	if (!cartridge::load(cartridge_path, rom))
 	{
-		printf("failed to load cartridge.\n");
+		printf("failed to load %s.\n", cartridge_path);
 		return -1;
 	}
 
@@ -2966,11 +2996,25 @@ int main(int argc, char *argv[])
 	const uint8_t super_gameboy = rom[0x146];
 	printf("super gameboy = 0x%02X\n", super_gameboy);
 
-	// Only support type 0x00 (ROM-ONLY) right now.
 	const uint8_t cartridge_type = rom[0x147];
 	printf("cartridge type = 0x%02X\n", cartridge_type);
 
 	printf("\n");
+
+	switch (cartridge_type)
+	{
+	case 0x00: memory::controller = memory::controller_type::NONE; break;
+	case 0x01:
+	case 0x02:
+	case 0x03: memory::controller = memory::controller_type::MBC1; break;
+	default:   memory::controller = memory::controller_type::UNKNOWN; break;
+	};
+
+	if (memory::controller == memory::controller_type::UNKNOWN)
+	{
+		printf("cartridge type is not supported\n");
+		return -1;
+	}
 
 	std::memcpy(&memory[0], &rom[0], rom.size());
 
@@ -2978,12 +3022,16 @@ int main(int argc, char *argv[])
 
 	// This would normally be done by the bootloader
 	cpu.registers.AF = 0x01B0;
-	//cpu.registers.AF = 0x11B0;
 	cpu.registers.BC = 0x0013;
 	cpu.registers.DE = 0x00D8;
 	cpu.registers.HL = 0x014D;
 	cpu.registers.SP = 0xFFFE;
 	cpu.registers.PC = 0x0100;
+
+	// HACK: I believe the above is "correct" but I want to match binjgb so
+	// I can more easily compare traces.
+	cpu.registers.AF = 0x11B0;
+	memory::write_byte(memory, 0xDFFF, 0x79);
 
 	uint32_t pixels[display::width * display::height];
 	memset(pixels, 0, display::width * display::height * sizeof(uint32_t));
@@ -3017,7 +3065,7 @@ int main(int argc, char *argv[])
 		}
 		else if (CURLINE < 153)
 		{
-			// V_BLANK period
+			// TODO: V_BLANK period?
 			++CURLINE;
 		}
 		else
