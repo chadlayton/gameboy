@@ -21,6 +21,15 @@ namespace debug
 	}
 }
 
+namespace interrupts
+{
+	static const uint8_t V_BLANK = 0x1;		// INT 40
+	static const uint8_t LCD_STAT = 0x2;	// INT 48
+	static const uint8_t TIMER = 0x4;		// INT 50
+	static const uint8_t SERIAL = 0x8;		// INT 58
+	static const uint8_t JOYPAD = 0x10;		// INT 60
+}
+
 namespace memory
 {
 	enum class controller_type
@@ -86,28 +95,122 @@ namespace memory
 		// Interrupt Enable
 		static const uint16_t IE = 0xFFFF;
 
-		// LCD Control
-		//	7 : LCD Display Enable (0 = Off, 1 = On)
-		//	6 : Window Tile Map Display Select (0 = 9800 - 9BFF, 1 = 9C00 - 9FFF)
-		//	5 : Window Display Enable (0 = Off, 1 = On)
-		//	4 : BG & Window Tile Data Select (0 = 8800 - 97FF, 1 = 8000 - 8FFF)
-		//	3 : BG Tile Map Display Select (0 = 9800 - 9BFF, 1 = 9C00 - 9FFF)
-		//	2 : OBJ (Sprite) Size (0 = 8x8, 1 = 8x16)
-		//	1 : OBJ (Sprite) Display Enable (0 = Off, 1 = On)
-		//	0 : BG Display (Depends on GameBoy type) (0 = Off, 1 = On)
+		/*
+		LCD Control Register
+		--------------------
+
+		FF40 - LCDC - LCD Control (R/W)
+		Bit 7 - LCD Display Enable             (0=Off, 1=On)
+		Bit 6 - Window Tile Map Display Select (0=9800-9BFF, 1=9C00-9FFF)
+		Bit 5 - Window Display Enable          (0=Off, 1=On)
+		Bit 4 - BG & Window Tile Data Select   (0=8800-97FF, 1=8000-8FFF)
+		Bit 3 - BG Tile Map Display Select     (0=9800-9BFF, 1=9C00-9FFF)
+		Bit 2 - OBJ (Sprite) Size              (0=8x8, 1=8x16)
+		Bit 1 - OBJ (Sprite) Display Enable    (0=Off, 1=On)
+		Bit 0 - BG Display (for CGB see below) (0=Off, 1=On)
+
+		LCDC.7 - LCD Display Enable
+		CAUTION: Stopping LCD operation (Bit 7 from 1 to 0) may be performed during
+		V-Blank ONLY, disabeling the display outside of the V-Blank period may damage
+		the hardware. This appears to be a serious issue, Nintendo is reported to
+		reject any games that do not follow this rule.
+		V-blank can be confirmed when the value of LY is greater than or equal to 144.
+		When the display is disabled the screen is blank (white), and VRAM and OAM can
+		be accessed freely.
+
+		--- LCDC.0 has different Meanings depending on Gameboy Type ---
+
+		LCDC.0 - 1) Monochrome Gameboy and SGB: BG Display
+		When Bit 0 is cleared, the background becomes blank (white). Window and
+		Sprites may still be displayed (if enabled in Bit 1 and/or Bit 5).
+
+		LCDC.0 - 2) CGB in CGB Mode: BG and Window Master Priority
+		When Bit 0 is cleared, the background and window lose their priority - the
+		sprites will be always displayed on top of background and window,
+		independently of the priority flags in OAM and BG Map attributes.
+
+		LCDC.0 - 3) CGB in Non CGB Mode: BG and Window Display
+		When Bit 0 is cleared, both background and window become blank (white), ie.
+		the Window Display Bit (Bit 5) is ignored in that case. Only Sprites may still
+		be displayed (if enabled in Bit 1).
+		This is a possible compatibility problem - any monochrome games (if any) that
+		disable the background, but still want to display the window wouldn't work
+		properly on CGBs.
+		*/
 		static const uint16_t LCDC = 0xFF40;
 
-		// Specifies the position in the 256x256 pixels BG map (32x32 tiles) which 
-		// is to be displayed at the upper/left LCD display position. Values in range 
-		// from 0 - 255 may be used for X / Y each, the video controller automatically 
-		// wraps if drawing exceeds the BG map area.
+		/*
+		LCD Status Register
+		-------------------
+
+		FF41 - STAT - LCDC Status   (R/W)
+		Bit 6 - LYC=LY Coincidence Interrupt (1=Enable) (Read/Write)
+		Bit 5 - Mode 2 OAM Interrupt         (1=Enable) (Read/Write)
+		Bit 4 - Mode 1 V-Blank Interrupt     (1=Enable) (Read/Write)
+		Bit 3 - Mode 0 H-Blank Interrupt     (1=Enable) (Read/Write)
+		Bit 2 - Coincidence Flag  (0:LYC<>LY, 1:LYC=LY) (Read Only)
+		Bit 1-0 - Mode Flag       (Mode 0-3, see below) (Read Only)
+					0: During H-Blank
+					1: During V-Blank
+					2: During Searching OAM-RAM
+					3: During Transfering Data to LCD Driver
+
+		The two lower STAT bits show the current status of the LCD controller.
+		Mode 0: The LCD controller is in the H-Blank period and
+				the CPU can access both the display RAM (8000h-9FFFh)
+				and OAM (FE00h-FE9Fh)
+
+		Mode 1: The LCD contoller is in the V-Blank period (or the
+				display is disabled) and the CPU can access both the
+				display RAM (8000h-9FFFh) and OAM (FE00h-FE9Fh)
+
+		Mode 2: The LCD controller is reading from OAM memory.
+				The CPU <cannot> access OAM memory (FE00h-FE9Fh)
+				during this period.
+
+		Mode 3: The LCD controller is reading from both OAM and VRAM,
+				The CPU <cannot> access OAM and VRAM during this period.
+				CGB Mode: Cannot access Palette Data (FF69,FF6B) either.
+
+		The following are typical when the display is enabled:
+		Mode 2  2_____2_____2_____2_____2_____2___________________2____
+		Mode 3  _33____33____33____33____33____33__________________3___
+		Mode 0  ___000___000___000___000___000___000________________000
+		Mode 1  ____________________________________11111111111111_____
+
+		The Mode Flag goes through the values 0, 2, and 3 at a cycle of about 109uS. 0
+		is present about 48.6uS, 2 about 19uS, and 3 about 41uS. This is interrupted
+		every 16.6ms by the VBlank (1). The mode flag stays set at 1 for about 1.08
+		ms.
+
+		Mode 0 is present between 201-207 clks, 2 about 77-83 clks, and 3 about
+		169-175 clks. A complete cycle through these states takes 456 clks. VBlank
+		lasts 4560 clks. A complete screen refresh occurs every 70224 clks.)
+		*/
+		static const uint16_t STAT = 0xFF41;
+
+		/*
+		LCD Position and Scrolling
+		--------------------------
+
+		FF42 - SCY - Scroll Y   (R/W)
+		FF43 - SCX - Scroll X   (R/W)
+		Specifies the position in the 256x256 pixels BG map (32x32 tiles) which is to
+		be displayed at the upper/left LCD display position.
+		Values in range from 0-255 may be used for X/Y each, the video controller
+		automatically wraps back to the upper (left) position in BG map when drawing
+		exceeds the lower (right) border of the BG map area.
+		*/
 		static const uint16_t SCY = 0xFF42;
 		static const uint16_t SCX = 0xFF43;
 
-		// LCDC Y-Coordinate. The LY indicates the vertical line to which the present 
-		// data is transferred to the LCD Driver. The LY can take on any value between
-		// 0 through 153. The values between 144 and 153 indicate the V-Blank period. 
-		// Writing will reset the counter.
+		/*
+		FF44 - LY - LCDC Y-Coordinate (R)
+		The LY indicates the vertical line to which the present data is transferred to
+		the LCD Driver. The LY can take on any value between 0 through 153. The values
+		between 144 and 153 indicate the V-Blank period. Writing will reset the
+		counter.
+		*/
 		static const uint16_t LY = 0xFF44;
 	}
 
@@ -185,11 +288,6 @@ namespace memory
 
 namespace cpu
 {
-	static bool debug_instruction = false;
-	static bool debug_registers = false;
-	static bool debug_step = false;
-	static bool debug_serial = false;
-
 	struct cpu
 	{
 		struct registers
@@ -2692,56 +2790,52 @@ namespace cpu
 
 	int tick(cpu& cpu, std::vector<uint8_t>& memory)
 	{
+		static bool debug_instruction = false;
+		static bool debug_registers = false;
+		static bool debug_step = false;
+		static bool debug_serial = false;
+
 		// This is where a tileset is first loaded into memory on Tetris
 		if (cpu.registers.PC == 0x036C)
 		{
 			static int i = 0;
 			++i;
-
-			debug_instruction = true;
-			debug_registers = true;
 		}
 
 		// Handle interrupts
 		if (cpu.interrupt_master)
 		{
-			static const uint8_t V_BLANK = 0x1;		// INT 40
-			static const uint8_t LCD_STAT = 0x2;	// INT 48
-			static const uint8_t TIMER = 0x4;		// INT 50
-			static const uint8_t SERIAL = 0x8;		// INT 58
-			static const uint8_t JOYPAD = 0x10;		// INT 60
-
 			const uint8_t interrupt_enable = memory::read_byte(memory, memory::registers::IE);
 			const uint8_t interrupt_flags = memory::read_byte(memory, memory::registers::IF);
 			const uint8_t interrupts_triggered = interrupt_enable & interrupt_flags;
 
 			if (interrupts_triggered)
 			{
-				if (interrupts_triggered & V_BLANK)
+				if (interrupts_triggered & interrupts::V_BLANK)
 				{
 					uint8_t operands[2] = { 0x40, 0x00 };
 					instructions::call_nn(operands, cpu, memory);
 				}
 
-				if (interrupts_triggered & LCD_STAT)
+				if (interrupts_triggered & interrupts::LCD_STAT)
 				{
 					uint8_t operands[2] = { 0x48, 0x00 };
 					instructions::call_nn(operands, cpu, memory);
 				}
 
-				if (interrupts_triggered & TIMER)
+				if (interrupts_triggered & interrupts::TIMER)
 				{
 					uint8_t operands[2] = { 0x50, 0x00 };
 					instructions::call_nn(operands, cpu, memory);
 				}
 
-				if (interrupts_triggered & SERIAL)
+				if (interrupts_triggered & interrupts::SERIAL)
 				{
 					uint8_t operands[2] = { 0x58, 0x00 };
 					instructions::call_nn(operands, cpu, memory);
 				}
 
-				if (interrupts_triggered & JOYPAD)
+				if (interrupts_triggered & interrupts::JOYPAD)
 				{
 					uint8_t operands[2] = { 0x60, 0x00 };
 					instructions::call_nn(operands, cpu, memory);
@@ -2856,6 +2950,10 @@ namespace display
 	static const uint8_t width = 160;
 	static const uint8_t height = 144;
 
+	uint32_t pixels[width * height] = { 0 };
+
+	unsigned cycles = 0;
+
 	namespace detail
 	{
 		uint8_t read_tile_num(const std::vector<uint8_t>& memory, uint8_t bg_map_x, uint8_t bg_map_y)
@@ -2887,37 +2985,79 @@ namespace display
 		}
 	}
 
-	void tick(const std::vector<uint8_t>& memory, uint8_t scanline_idx, uint8_t scanline[width])
+	void tick(std::vector<uint8_t>& memory, unsigned cpu_cycles)
 	{
 		// TODO: Tile bank switching
 		// TODO: Wrapping
 
-		assert(scanline_idx < height);
-
-		const uint8_t SCX = memory::read_byte(memory, memory::registers::SCX);
-		const uint8_t SCY = memory::read_byte(memory, memory::registers::SCY);
-
-		uint8_t pixels_read = 0;
-
+		static const uint32_t palette[4] =
 		{
-			const uint8_t tile_num = detail::read_tile_num(memory, SCX, scanline_idx + SCY);
-			pixels_read += detail::read_tile_row(memory, tile_num, (scanline_idx + SCY) % 8, SCX % 8, 8, &scanline[pixels_read]);
-		}
+			0xFFFFFFFF,
+			0xC0C0C0FF,
+			0x606060FF,
+			0x000000FF,
+		};
 
-		while (width - pixels_read >= 8)
+		static const unsigned cycles_per_scanline = 456;
+
+		cycles += cpu_cycles;
+
+		if (cycles > cycles_per_scanline)
 		{
-			const uint8_t tile_num = detail::read_tile_num(memory, SCX + pixels_read, scanline_idx + SCY);
-			pixels_read += detail::read_tile_row(memory, tile_num, (scanline_idx + SCY) % 8, 0, 8, &scanline[pixels_read]);
-		}
+			uint8_t LY = memory::read_byte(memory, memory::registers::LY);
 
-		const uint8_t remaining_pixels = width - pixels_read;
-		if (remaining_pixels)
-		{
-			const uint8_t tile_num = detail::read_tile_num(memory, SCX + pixels_read, scanline_idx + SCY);
-			pixels_read += detail::read_tile_row(memory, tile_num, (scanline_idx + SCY) % 8, 0, remaining_pixels, &scanline[pixels_read]);
-		}
+			if (LY < height)
+			{
+				const uint8_t SCX = memory::read_byte(memory, memory::registers::SCX);
+				const uint8_t SCY = memory::read_byte(memory, memory::registers::SCY);
 
-		assert(pixels_read == width);
+				uint8_t pixels_read = 0;
+				uint8_t scanline[width];
+
+				{
+					const uint8_t tile_num = detail::read_tile_num(memory, SCX, LY + SCY);
+					pixels_read += detail::read_tile_row(memory, tile_num, (LY + SCY) % 8, SCX % 8, 8, &scanline[pixels_read]);
+				}
+
+				while (width - pixels_read >= 8)
+				{
+					const uint8_t tile_num = detail::read_tile_num(memory, SCX + pixels_read, LY + SCY);
+					pixels_read += detail::read_tile_row(memory, tile_num, (LY + SCY) % 8, 0, 8, &scanline[pixels_read]);
+				}
+
+				const uint8_t remaining_pixels = width - pixels_read;
+				if (remaining_pixels)
+				{
+					const uint8_t tile_num = detail::read_tile_num(memory, SCX + pixels_read, LY + SCY);
+					pixels_read += detail::read_tile_row(memory, tile_num, (LY + SCY) % 8, 0, remaining_pixels, &scanline[pixels_read]);
+				}
+
+				assert(pixels_read == width);
+
+				for (uint8_t x = 0; x < display::width; ++x)
+				{
+					pixels[LY * width + x] = palette[scanline[x]];
+				}
+
+				++LY;
+			}
+			else if (LY == height)
+			{
+				++LY;
+			}
+			else if (LY < height + 9)
+			{
+				++LY;
+			}
+			else
+			{
+				LY = 0;
+			}
+
+			cycles -= cycles_per_scanline;
+
+			memory::write_byte(memory, memory::registers::LY, LY);
+		}
 	}
 }
 
@@ -3028,54 +3168,22 @@ int main(int argc, char *argv[])
 	cpu.registers.SP = 0xFFFE;
 	cpu.registers.PC = 0x0100;
 
+	memory::write_byte(memory, memory::registers::LCDC, 0x91);
+	memory::write_byte(memory, memory::registers::STAT, 0x85);
+
 	// HACK: I believe the above is "correct" but I want to match binjgb so
 	// I can more easily compare traces.
 	cpu.registers.AF = 0x11B0;
 	memory::write_byte(memory, 0xDFFF, 0x79);
 
-	uint32_t pixels[display::width * display::height];
-	memset(pixels, 0, display::width * display::height * sizeof(uint32_t));
-
 	bool done = false;
 	while (!done)
 	{
-		uint8_t CURLINE = memory::read_byte(memory, memory::registers::LY);
-
+		const int cycles = cpu.cycles;
 		cpu::tick(cpu, memory);
+		display::tick(memory, cpu.cycles - cycles);
 
-		if (CURLINE < display::height)
-		{
-			static const uint32_t palette[4] =
-			{
-				0xFFFFFFFF,
-				0xC0C0C0FF,
-				0x606060FF,
-				0x000000FF,
-			};
-
-			uint8_t scanline[display::width];
-			display::tick(memory, CURLINE, scanline);
-
-			for (uint8_t x = 0; x < display::width; ++x)
-			{
-				pixels[CURLINE * display::width + x] = palette[scanline[x]];
-			}
-
-			++CURLINE;
-		}
-		else if (CURLINE < 153)
-		{
-			// TODO: V_BLANK period?
-			++CURLINE;
-		}
-		else
-		{
-			CURLINE = 0;
-		}
-
-		memory::write_byte(memory, memory::registers::LY, CURLINE);
-
-		SDL_UpdateTexture(texture, nullptr, pixels, display::width * sizeof(uint32_t));
+		SDL_UpdateTexture(texture, nullptr, display::pixels, display::width * sizeof(uint32_t));
 
 		SDL_Event event;
 		while (SDL_PollEvent(&event))
