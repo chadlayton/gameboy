@@ -2841,7 +2841,7 @@ namespace cpu
 					instructions::call_nn(operands, cpu, memory);
 				}
 
-				memory::write_byte(memory, memory[memory::registers::IF], (interrupt_flags & ~interrupts_triggered));
+				memory::write_byte(memory, memory::registers::IF, (interrupt_flags & ~interrupts_triggered));
 
 				cpu.interrupt_master = 0;
 			}
@@ -3043,10 +3043,12 @@ namespace display
 			}
 			else if (LY == height)
 			{
+				// TOOD: Trigger V_BLANK
 				++LY;
 			}
 			else if (LY < height + 9)
 			{
+				// V_BLANK
 				++LY;
 			}
 			else
